@@ -173,7 +173,7 @@ SlamKarto::SlamKarto() :
   if(private_nh_.getParam("minimum_travel_distance", minimum_travel_distance))
     mapper_->setParamMinimumTravelDistance(minimum_travel_distance);
 
-  int minimum_travel_heading;
+  double minimum_travel_heading;
   if(private_nh_.getParam("minimum_travel_heading", minimum_travel_heading))
     mapper_->setParamMinimumTravelHeading(minimum_travel_heading);
 
@@ -186,7 +186,7 @@ SlamKarto::SlamKarto() :
     mapper_->setParamScanBufferMaximumScanDistance(scan_buffer_maximum_scan_distance);
 
   double link_match_minimum_response_fine;
-  if(private_nh_.getParam("link_match_minimum_response_fine", link_match_minimum_response_fine));
+  if(private_nh_.getParam("link_match_minimum_response_fine", link_match_minimum_response_fine))
     mapper_->setParamLinkMatchMinimumResponseFine(link_match_minimum_response_fine);
 
   double link_scan_maximum_distance;
@@ -322,7 +322,7 @@ SlamKarto::publishLoop(double transform_publish_period)
 void
 SlamKarto::publishTransform()
 {
-  boost::mutex::scoped_lock(map_to_odom_mutex_);
+  boost::mutex::scoped_lock lock(map_to_odom_mutex_);
   ros::Time tf_expiration = ros::Time::now() + ros::Duration(0.05);
   tfB_->sendTransform(tf::StampedTransform (map_to_odom_, ros::Time::now(), map_frame_, odom_frame_));
 }
@@ -359,30 +359,26 @@ SlamKarto::getLaser(const sensor_msgs::LaserScan::ConstPtr& scan)
 	     laser_pose.getOrigin().x(),
 	     laser_pose.getOrigin().y(),
 	     yaw);
-    // To account for lasers that are mounted upside-down, we determine the
-    // min, max, and increment angles of the laser in the base frame.
-    tf::Quaternion q;
-    q.setRPY(0.0, 0.0, scan->angle_min);
-    tf::Stamped<tf::Quaternion> min_q(q, scan->header.stamp,
-                                      scan->header.frame_id);
-    q.setRPY(0.0, 0.0, scan->angle_max);
-    tf::Stamped<tf::Quaternion> max_q(q, scan->header.stamp,
-                                      scan->header.frame_id);
+    // To account for lasers that are mounted upside-down,
+    // we create a point 1m above the laser and transform it into the laser frame
+    // if the point's z-value is <=0, it is upside-down
+
+    tf::Vector3 v;
+    v.setValue(0, 0, 1 + laser_pose.getOrigin().z());
+    tf::Stamped<tf::Vector3> up(v, scan->header.stamp, base_frame_);
+
     try
     {
-      tf_.transformQuaternion(base_frame_, min_q, min_q);
-      tf_.transformQuaternion(base_frame_, max_q, max_q);
+      tf_.transformPoint(scan->header.frame_id, up, up);
+      ROS_DEBUG("Z-Axis in sensor frame: %.3f", up.z());
     }
-    catch(tf::TransformException& e)
+    catch (tf::TransformException& e)
     {
-      ROS_WARN("Unable to transform min/max laser angles into base frame: %s",
-               e.what());
+      ROS_WARN("Unable to determine orientation of laser: %s", e.what());
       return NULL;
     }
 
-    double angle_min = tf::getYaw(min_q);
-    double angle_max = tf::getYaw(max_q);
-    bool inverse =  lasers_inverted_[scan->header.frame_id] = angle_max < angle_min;
+    bool inverse = lasers_inverted_[scan->header.frame_id] = up.z() <= 0;
     if (inverse)
       ROS_INFO("laser is mounted upside-down");
 
@@ -564,7 +560,7 @@ SlamKarto::laserCallback(const sensor_msgs::LaserScan::ConstPtr& scan)
 bool
 SlamKarto::updateMap()
 {
-  boost::mutex::scoped_lock(map_mutex_);
+  boost::mutex::scoped_lock lock(map_mutex_);
 
   karto::OccupancyGrid* occ_grid = 
           karto::OccupancyGrid::CreateFromScans(mapper_->GetAllProcessedScans(), resolution_);
@@ -711,7 +707,7 @@ bool
 SlamKarto::mapCallback(nav_msgs::GetMap::Request  &req,
                        nav_msgs::GetMap::Response &res)
 {
-  boost::mutex::scoped_lock(map_mutex_);
+  boost::mutex::scoped_lock lock(map_mutex_);
   if(got_map_ && map_.map.info.width && map_.map.info.height)
   {
     res = map_;
